@@ -37,7 +37,7 @@ import Control.Concurrent.STM (atomically, retry)
 import Control.Concurrent.STM.TVar
 import Control.DeepSeq
 import Control.Lens (set, view, preview)
-import Control.Monad ((<$!>), forM, mzero, when, void)
+import Control.Monad
 import Control.Monad.Catch hiding (Handler)
 import Control.Monad.Reader
 import Control.Monad.State.Strict
@@ -383,7 +383,7 @@ localHandler
     -> Handler LocalResult
 localHandler logger v cid pact preflight sigVerify rewindDepth cmd = do
     liftIO $ logg Info $ PactCmdLogLocal cmd
-    cmd' <- case doCommandValidation cmd of
+    cmd' <- case validatedCommand of
       Right c -> return c
       Left err ->
         throwError $ setErrText ("Validation failed: " <> T.pack err) err400
@@ -399,7 +399,7 @@ localHandler logger v cid pact preflight sigVerify rewindDepth cmd = do
   where
     logg = logFunctionJson (setComponent "local-handler" logger)
 
-    doCommandValidation cmdText
+    validatedCommand
       | Just NoVerify <- sigVerify = do
           --
           -- desnote(emily): This workflow is 'Pact.Types.Command.verifyCommand'
@@ -408,11 +408,11 @@ localHandler logger v cid pact preflight sigVerify rewindDepth cmd = do
           -- down in the 'execLocal' code, 'noSigVerify' triggers a nop on
           -- checking again if 'preflight' is set.
           --
-          let cmdBS = encodeUtf8 <$> cmdText
+          let payloadBS = encodeUtf8 (_cmdPayload cmd)
 
-          void $ Pact.verifyHash @'Pact.Blake2b_256 (_cmdHash cmdBS) (_cmdPayload cmdBS)
-          decoded <- eitherDecodeStrict' $ _cmdPayload cmdBS
-          p <- traverse Pact.parsePact decoded
+          void $ Pact.verifyHash @'Pact.Blake2b_256 (_cmdHash cmd) payloadBS
+          decoded <- eitherDecodeStrict' payloadBS
+          payloadParsed <- traverse Pact.parsePact decoded
 
           let cmd' = cmdBS { _cmdPayload = p }
           pure $ mkPayloadWithText cmdBS <$> cmd'
@@ -711,6 +711,24 @@ validateCommand v cid cmdText = case parsedPayload of
     parsedPayload = traverse (parsePact (maxBound :: PactParserVersion))
                     =<< Aeson.eitherDecodeStrict' payloadBs
 
+-- TODO: all of the functions in this module can instead grab the current block height from consensus
+-- and pass it here to get a better estimate of what behavior is correct.
+validateCommand :: ChainwebVersion -> ChainId -> Command Text -> Either String ChainwebTransaction
+validateCommand v cid (fmap encodeUtf8 -> cmdBs) = case parsedCmd of
+  Right (commandParsed :: ChainwebTransaction) ->
+    if assertCommand
+         commandParsed
+         (validPPKSchemes v cid bh)
+         (isWebAuthnPrefixLegal v cid bh)
+    then Right commandParsed
+    else Left "Command failed validation"
+  Left e -> Left $ "Pact parsing error: " ++ e
+  where
+    bh = maxBound :: BlockHeight
+    decodeAndParse bs =
+        traverse (parsePact (pactParserVersion v cid bh)) =<< Aeson.eitherDecodeStrict' bs
+    parsedCmd = mkPayloadWithText <$>
+        cmdPayload (\bs -> (bs,) <$> decodeAndParse bs) cmdBs
 
 -- | Validate the length of the request key's underlying hash.
 --

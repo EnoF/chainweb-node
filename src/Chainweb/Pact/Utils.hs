@@ -92,6 +92,7 @@ generateKAccountFromPubKey pubKey
     validPubKey = ed25519HexFormat pubKey
 
 
+
 -- Warning: Only use if already certain that PublicKeyText
 -- is valid.
 -- Note: We are assuming the k: account is ED25519.
